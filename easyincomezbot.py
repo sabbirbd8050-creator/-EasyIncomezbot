@@ -42,7 +42,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 #       8289191009
 # =========================================================
 
-BOT_TOKEN = os.getenv("8818824501:AAGAHqX8in0PL4XAvfSkP12TEjvTLgIzi4E", "PASTE_YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = "8818824501:AAGAHqX8in0PL4XAvfSkP12TEjvTLgIzi4E"
 ADMIN_ID = 8289191009
 DB_FILE = "easyincomezbot.db"
 

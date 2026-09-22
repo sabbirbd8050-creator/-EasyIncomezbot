@@ -214,56 +214,69 @@ def admin_kb():
     )
 
 
+def _safe_url_btn(label: str, url: str, missing_cb: str) -> InlineKeyboardButton:
+    url = (url or "").strip()
+    label = (label or "Button")[:64]
+    if url.startswith("https://") or url.startswith("http://"):
+        return InlineKeyboardButton(label, url=url)
+    return InlineKeyboardButton(label, callback_data=missing_cb)
+
+
 def build_start_keyboard() -> InlineKeyboardMarkup:
+    """Always returns a valid inline keyboard (Open App + 4 links)."""
     rows = []
-    webapp = (get_setting("webapp_url") or "").strip()
-    btn_name = get_setting("webapp_button") or "🚀 Open App"
+    try:
+        webapp = (get_setting("webapp_url") or "").strip()
+        btn_name = (get_setting("webapp_button") or "🚀 Open App")[:64]
 
-    if webapp:
         if webapp.startswith("https://"):
-            rows.append(
-                [InlineKeyboardButton(btn_name, web_app=WebAppInfo(url=webapp))]
-            )
-        else:
-            # http or t.me — use normal URL button
+            try:
+                rows.append(
+                    [InlineKeyboardButton(btn_name, web_app=WebAppInfo(url=webapp))]
+                )
+            except Exception:
+                rows.append([InlineKeyboardButton(btn_name, url=webapp)])
+        elif webapp.startswith("http://"):
             rows.append([InlineKeyboardButton(btn_name, url=webapp)])
-    else:
+        else:
+            rows.append(
+                [InlineKeyboardButton(btn_name, callback_data="noop")]
+            )
+
+        ch = get_setting("channel_url") or ""
+        su = get_setting("support_url") or ""
+        gr = get_setting("group_url") or ""
+        rv = get_setting("reviews_url") or ""
+        ch_l = get_setting("channel_label") or "📢 Channel"
+        su_l = get_setting("support_label") or "💬 Support"
+        gr_l = get_setting("group_label") or "👥 Group"
+        rv_l = get_setting("reviews_label") or "⭐ Reviews"
+
         rows.append(
-            [InlineKeyboardButton(btn_name + " (not set)", callback_data="noop")]
+            [
+                _safe_url_btn(ch_l, ch, "link_missing_ch"),
+                _safe_url_btn(su_l, su, "link_missing_su"),
+            ]
         )
-
-    ch = (get_setting("channel_url") or "").strip()
-    su = (get_setting("support_url") or "").strip()
-    gr = (get_setting("group_url") or "").strip()
-    rv = (get_setting("reviews_url") or "").strip()
-
-    ch_l = get_setting("channel_label") or "📢 Channel"
-    su_l = get_setting("support_label") or "💬 Support"
-    gr_l = get_setting("group_label") or "👥 Group"
-    rv_l = get_setting("reviews_label") or "⭐ Reviews"
-
-    row2 = []
-    if ch:
-        row2.append(InlineKeyboardButton(ch_l, url=ch))
-    else:
-        row2.append(InlineKeyboardButton(ch_l, callback_data="link_missing_ch"))
-    if su:
-        row2.append(InlineKeyboardButton(su_l, url=su))
-    else:
-        row2.append(InlineKeyboardButton(su_l, callback_data="link_missing_su"))
-    rows.append(row2)
-
-    row3 = []
-    if gr:
-        row3.append(InlineKeyboardButton(gr_l, url=gr))
-    else:
-        row3.append(InlineKeyboardButton(gr_l, callback_data="link_missing_gr"))
-    if rv:
-        row3.append(InlineKeyboardButton(rv_l, url=rv))
-    else:
-        row3.append(InlineKeyboardButton(rv_l, callback_data="link_missing_rv"))
-    rows.append(row3)
-
+        rows.append(
+            [
+                _safe_url_btn(gr_l, gr, "link_missing_gr"),
+                _safe_url_btn(rv_l, rv, "link_missing_rv"),
+            ]
+        )
+    except Exception as e:
+        logger.exception("build_start_keyboard: %s", e)
+        rows = [
+            [InlineKeyboardButton("🚀 Open App", callback_data="noop")],
+            [
+                InlineKeyboardButton("📢 Channel", callback_data="link_missing_ch"),
+                InlineKeyboardButton("💬 Support", callback_data="link_missing_su"),
+            ],
+            [
+                InlineKeyboardButton("👥 Group", callback_data="link_missing_gr"),
+                InlineKeyboardButton("⭐ Reviews", callback_data="link_missing_rv"),
+            ],
+        ]
     return InlineKeyboardMarkup(rows)
 
 
@@ -294,27 +307,79 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif arg.isdigit():
             ref = int(arg)
 
-    ensure_user(
-        uid,
-        update.effective_user.username,
-        update.effective_user.full_name,
-        ref,
-    )
+    try:
+        ensure_user(
+            uid,
+            update.effective_user.username,
+            update.effective_user.full_name,
+            ref,
+        )
+    except Exception as e:
+        logger.exception("ensure_user: %s", e)
 
     text = start_message_text()
-    kb = build_start_keyboard()
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
-
-    if is_admin(uid):
-        await update.message.reply_text(
-            "🔧 Admin: /admin দিয়ে প্যানেল খুলুন।",
-            reply_markup=admin_kb(),
+    if not text or not str(text).strip():
+        text = (
+            "🎁 <b>Welcome!</b>\n\n"
+            "নিচের বাটন ব্যবহার করুন।\n"
+            "Admin Panel থেকে টেক্সট ও লিংক সেট করুন।"
         )
+
+    kb = build_start_keyboard()
+
+    # 1) Always try to send welcome + inline buttons
+    sent = False
+    try:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        sent = True
+    except Exception as e:
+        logger.warning("start HTML failed: %s — retry plain", e)
+        try:
+            # strip simple tags for fallback
+            plain = (
+                text.replace("<b>", "")
+                .replace("</b>", "")
+                .replace("<i>", "")
+                .replace("</i>", "")
+                .replace("<code>", "")
+                .replace("</code>", "")
+            )
+            await update.message.reply_text(
+                plain,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            sent = True
+        except Exception as e2:
+            logger.exception("start plain failed: %s", e2)
+
+    # 2) If still failed, send buttons alone
+    if not sent:
+        try:
+            await update.message.reply_text(
+                "নিচের বাটনগুলো ব্যবহার করুন:",
+                reply_markup=kb,
+            )
+        except Exception as e3:
+            logger.exception("start buttons only: %s", e3)
+            await update.message.reply_text(
+                "Welcome! (বাটন লোড হয়নি — Admin WebApp/লিংক চেক করুন)"
+            )
+
+    # 3) Admin hint without hiding start buttons (separate short msg)
+    if is_admin(uid):
+        try:
+            await update.message.reply_text(
+                "🔧 Admin: /admin",
+                reply_markup=admin_kb(),
+            )
+        except Exception:
+            pass
 
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):

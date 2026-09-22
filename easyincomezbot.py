@@ -1,887 +1,696 @@
-import asyncio
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Mini App Launcher / Welcome Bot
+UI like: invite message + Open App (WebApp) + Channel / Support / Group / Reviews
+
+Main Admin: 8289191009
+- /start shows configurable welcome + inline buttons
+- Admin can set: welcome text, Open App URL, Channel/Support/Group/Reviews links
+- Add Admin / Remove Admin / Ownership Transfer
+- Persistent reply menu for admin
+"""
+
 import logging
 import os
 import sqlite3
-from contextlib import closing
-from html import escape
-from urllib.parse import urlparse
+from datetime import datetime
+from typing import Optional
 
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    CallbackQuery,
+from telegram import (
+    Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     WebAppInfo,
+    MenuButtonWebApp,
+    MenuButtonCommands,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters,
+)
+from telegram.constants import ParseMode
+
+# ================== CONFIG ==================
+BOT_TOKEN = "8818824501:AAHRg07xfYBpjm32kJMpObt9icp5S0dknoM"
+MAIN_ADMIN_ID = 8289191009
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "miniapp_launcher.db")
+
+(
+    SET_VALUE,
+    ADD_ADMIN_ID,
+    REMOVE_ADMIN_ID,
+    TRANSFER_ID,
+) = range(4)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 
-# =========================================================
-# EasyIncomezBot - Python + aiogram 3.x
-# =========================================================
-# 1) Install:
-#       pip install -U aiogram
-#
-# 2) Put your BotFather token in BOT_TOKEN below, OR set:
-#       BOT_TOKEN=your_token
-#
-# 3) Run:
-#       python easyincomezbot.py
-#
-# Admin Telegram ID:
-#       8289191009
-# =========================================================
-
-BOT_TOKEN = "8818824501:AAGAHqX8in0PL4XAvfSkP12TEjvTLgIzi4E"
-ADMIN_ID = 8289191009
-DB_FILE = "easyincomezbot.db"
-
-
-DEFAULT_WELCOME = """🎉 Welcome to EasyIncomezBot! 💰
-
-🚀 এখানে সহজ কিছু কাজ সম্পন্ন করে রিওয়ার্ড অর্জন করুন।
-
-✨ যা যা করতে পারবেন:
-📺 Ads দেখুন এবং পয়েন্ট অর্জন করুন
-✅ বিভিন্ন Task সম্পূর্ণ করে Reward নিন
-👥 বন্ধুদের Invite করে অতিরিক্ত Reward পান
-💳 নির্দিষ্ট ব্যালেন্স হলে Withdrawal Request করুন
-
-👇 শুরু করতে নিচের বাটনে ক্লিক করুন।
-
-💙 EasyIncomezBot
-⚡ Watch • Task • Earn"""
-
-DEFAULTS = {
-    "welcome_text": DEFAULT_WELCOME,
-    "welcome_photo": "",
-    "open_text": "🚀 Open App",
-    "open_url": "",
-    "channel_text": "📢 Channel",
-    "channel_url": "",
-    "support_text": "💬 Support",
-    "support_url": "",
-    "group_text": "👥 Group",
-    "group_url": "",
-    "reviews_text": "⭐ Reviews",
-    "reviews_url": "",
-}
-
-
-# =========================================================
-# DATABASE
-# =========================================================
-
-def db():
-    return sqlite3.connect(DB_FILE)
+# ================== DB ==================
+def get_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db():
-    with closing(db()) as conn:
-        cur = conn.cursor()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT DEFAULT 'admin',
+            added_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            referrer_id INTEGER,
+            joined_at TEXT
+        );
+        """
+    )
+    defaults = {
+        "owner_id": str(MAIN_ADMIN_ID),
+        "bot_title": "TONTraderAI",
+        "welcome_text": (
+            "🎁 <b>You're Invited!</b>\n\n"
+            "Your friend invited you to join — the ultimate platform.\n\n"
+            "✨ <b>Your Exclusive Welcome Perks:</b>\n"
+            "• 🎁 Signup bonus ready to claim\n"
+            "• ⚡ Automated features inside the App\n"
+            "• 🤝 Referral program — invite friends\n\n"
+            "👇 Tap <b>Open App</b> below to continue!"
+        ),
+        "webapp_url": "",
+        "webapp_button": "🚀 Open App",
+        "channel_url": "",
+        "channel_label": "📢 Channel",
+        "support_url": "",
+        "support_label": "💬 Support",
+        "group_url": "",
+        "group_label": "👥 Group",
+        "reviews_url": "",
+        "reviews_label": "⭐ Reviews",
+        "banner_text": "",
+        "force_channel": "0",
+        "menu_webapp": "1",
+    }
+    for k, v in defaults.items():
+        cur.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v)
+        )
+    cur.execute(
+        "INSERT OR IGNORE INTO admins (user_id, role, added_at) VALUES (?, 'main', ?)",
+        (MAIN_ADMIN_ID, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                balance REAL NOT NULL DEFAULT 0,
-                referrals INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-
-        for key, value in DEFAULTS.items():
-            cur.execute(
-                "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
-                (key, value),
-            )
-
-        conn.commit()
-
-
-def get_setting(key: str) -> str:
-    with closing(db()) as conn:
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key = ?",
-            (key,),
-        ).fetchone()
-
-    return row[0] if row else DEFAULTS.get(key, "")
+def get_setting(key: str, default: str = "") -> str:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    if row and row["value"] is not None:
+        return row["value"]
+    return default
 
 
 def set_setting(key: str, value: str):
-    with closing(db()) as conn:
-        conn.execute(
-            """
-            INSERT INTO settings(key, value)
-            VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (key, value),
-        )
-        conn.commit()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
 
 
-def save_user(user):
-    with closing(db()) as conn:
-        conn.execute(
-            """
-            INSERT INTO users(user_id, username, first_name)
-            VALUES(?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username=excluded.username,
-                first_name=excluded.first_name
-            """,
+def owner_id() -> int:
+    try:
+        return int(get_setting("owner_id") or MAIN_ADMIN_ID)
+    except Exception:
+        return MAIN_ADMIN_ID
+
+
+def is_main(uid: int) -> bool:
+    return int(uid) == owner_id() or int(uid) == MAIN_ADMIN_ID
+
+
+def is_admin(uid: int) -> bool:
+    if is_main(uid):
+        return True
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM admins WHERE user_id=?", (uid,))
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def ensure_user(uid: int, username: str = None, full_name: str = None, referrer_id: int = None):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
+    if not cur.fetchone():
+        if referrer_id and int(referrer_id) == int(uid):
+            referrer_id = None
+        cur.execute(
+            """INSERT INTO users (user_id, username, full_name, referrer_id, joined_at)
+               VALUES (?,?,?,?,?)""",
             (
-                user.id,
-                user.username or "",
-                user.first_name or "",
+                uid,
+                username,
+                full_name,
+                referrer_id,
+                datetime.now().isoformat(),
             ),
         )
         conn.commit()
-
-
-def get_user(user_id: int):
-    with closing(db()) as conn:
-        return conn.execute(
-            """
-            SELECT user_id, username, first_name, balance, referrals
-            FROM users
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-
-
-def set_balance(user_id: int, amount: float):
-    with closing(db()) as conn:
-        conn.execute(
-            "UPDATE users SET balance = ? WHERE user_id = ?",
-            (amount, user_id),
+    else:
+        cur.execute(
+            "UPDATE users SET username=?, full_name=? WHERE user_id=?",
+            (username, full_name, uid),
         )
         conn.commit()
+    conn.close()
 
 
-def user_count() -> int:
-    with closing(db()) as conn:
-        return conn.execute(
-            "SELECT COUNT(*) FROM users"
-        ).fetchone()[0]
-
-
-def total_balance() -> float:
-    with closing(db()) as conn:
-        return conn.execute(
-            "SELECT COALESCE(SUM(balance), 0) FROM users"
-        ).fetchone()[0]
-
-
-# =========================================================
-# KEYBOARDS
-# =========================================================
-
-def admin_keyboard():
-    b = InlineKeyboardBuilder()
-
-    b.button(text="🚀 Open App", callback_data="edit:open")
-    b.button(text="📢 Channel", callback_data="edit:channel")
-
-    b.button(text="💬 Support", callback_data="edit:support")
-    b.button(text="👥 Group", callback_data="edit:group")
-
-    b.button(text="⭐ Reviews", callback_data="edit:reviews")
-    b.button(text="📝 Welcome Text", callback_data="edit:welcome")
-
-    b.button(text="🖼️ Welcome Photo", callback_data="edit:photo")
-    b.button(text="🗑️ Remove Photo", callback_data="edit:remove_photo")
-
-    b.button(text="👤 User Balance", callback_data="edit:balance")
-
-    b.button(text="⚙️ Settings", callback_data="show:settings")
-    b.button(text="👁️ Preview", callback_data="show:preview")
-
-    b.adjust(2, 2, 2, 2, 1, 2)
-
-    return b.as_markup()
-
-
-def user_menu():
+# ================== KEYBOARDS ==================
+def admin_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="🚀 Open App"),
-                KeyboardButton(text="📢 Channel"),
-            ],
-            [
-                KeyboardButton(text="💬 Support"),
-                KeyboardButton(text="👥 Group"),
-            ],
-            [
-                KeyboardButton(text="⭐ Reviews"),
-                KeyboardButton(text="💰 My Balance"),
-            ],
-            [
-                KeyboardButton(text="🔗 Referral"),
-            ],
+        [
+            ["📝 Welcome Text", "🖼 Banner Text"],
+            ["🚀 WebApp URL", "🔘 WebApp Button Name"],
+            ["📢 Channel Link", "💬 Support Link"],
+            ["👥 Group Link", "⭐ Reviews Link"],
+            ["🏷 Labels (Ch/Sup/Grp/Rev)", "👁 Preview Start"],
+            ["➕ Add Admin", "🗑 Remove Admin"],
+            ["👑 Ownership Transfer", "📊 Stats"],
+            ["🏠 Close Admin"],
         ],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
-def admin_reply_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="⚙️ Admin Panel")],
-            [
-                KeyboardButton(text="👤 User Balance"),
-                KeyboardButton(text="📊 Statistics"),
-            ],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
+def build_start_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    webapp = (get_setting("webapp_url") or "").strip()
+    btn_name = get_setting("webapp_button") or "🚀 Open App"
+
+    if webapp:
+        if webapp.startswith("https://"):
+            rows.append(
+                [InlineKeyboardButton(btn_name, web_app=WebAppInfo(url=webapp))]
+            )
+        else:
+            # http or t.me — use normal URL button
+            rows.append([InlineKeyboardButton(btn_name, url=webapp)])
+    else:
+        rows.append(
+            [InlineKeyboardButton(btn_name + " (not set)", callback_data="noop")]
+        )
+
+    ch = (get_setting("channel_url") or "").strip()
+    su = (get_setting("support_url") or "").strip()
+    gr = (get_setting("group_url") or "").strip()
+    rv = (get_setting("reviews_url") or "").strip()
+
+    ch_l = get_setting("channel_label") or "📢 Channel"
+    su_l = get_setting("support_label") or "💬 Support"
+    gr_l = get_setting("group_label") or "👥 Group"
+    rv_l = get_setting("reviews_label") or "⭐ Reviews"
+
+    row2 = []
+    if ch:
+        row2.append(InlineKeyboardButton(ch_l, url=ch))
+    else:
+        row2.append(InlineKeyboardButton(ch_l, callback_data="link_missing_ch"))
+    if su:
+        row2.append(InlineKeyboardButton(su_l, url=su))
+    else:
+        row2.append(InlineKeyboardButton(su_l, callback_data="link_missing_su"))
+    rows.append(row2)
+
+    row3 = []
+    if gr:
+        row3.append(InlineKeyboardButton(gr_l, url=gr))
+    else:
+        row3.append(InlineKeyboardButton(gr_l, callback_data="link_missing_gr"))
+    if rv:
+        row3.append(InlineKeyboardButton(rv_l, url=rv))
+    else:
+        row3.append(InlineKeyboardButton(rv_l, callback_data="link_missing_rv"))
+    rows.append(row3)
+
+    return InlineKeyboardMarkup(rows)
+
+
+def start_message_text() -> str:
+    banner = (get_setting("banner_text") or "").strip()
+    welcome = (get_setting("welcome_text") or "").strip()
+    parts = []
+    if banner:
+        parts.append(banner)
+    if welcome:
+        parts.append(welcome)
+    if not parts:
+        parts.append("Welcome! Configure text from Admin Panel.")
+    return "\n\n".join(parts)
+
+
+# ================== START ==================
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    ref = None
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("ref_"):
+            try:
+                ref = int(arg.replace("ref_", ""))
+            except Exception:
+                ref = None
+        elif arg.isdigit():
+            ref = int(arg)
+
+    ensure_user(
+        uid,
+        update.effective_user.username,
+        update.effective_user.full_name,
+        ref,
     )
 
-
-def welcome_inline_keyboard():
-    b = InlineKeyboardBuilder()
-
-    open_url = get_setting("open_url")
-    channel_url = get_setting("channel_url")
-    support_url = get_setting("support_url")
-    group_url = get_setting("group_url")
-    reviews_url = get_setting("reviews_url")
-
-    # Open App = Telegram Mini App Web App button.
-    if open_url:
-        b.button(
-            text=get_setting("open_text") or "🚀 Open App",
-            web_app=WebAppInfo(url=open_url),
-        )
-
-    row = []
-
-    if channel_url:
-        row.append(
-            InlineKeyboardButton(
-                text=get_setting("channel_text") or "📢 Channel",
-                url=channel_url,
-            )
-        )
-
-    if support_url:
-        row.append(
-            InlineKeyboardButton(
-                text=get_setting("support_text") or "💬 Support",
-                url=support_url,
-            )
-        )
-
-    if row:
-        b.row(*row)
-
-    row = []
-
-    if group_url:
-        row.append(
-            InlineKeyboardButton(
-                text=get_setting("group_text") or "👥 Group",
-                url=group_url,
-            )
-        )
-
-    if reviews_url:
-        row.append(
-            InlineKeyboardButton(
-                text=get_setting("reviews_text") or "⭐ Reviews",
-                url=reviews_url,
-            )
-        )
-
-    if row:
-        b.row(*row)
-
-    return b.as_markup()
-
-
-# =========================================================
-# FSM
-# =========================================================
-
-class EditState(StatesGroup):
-    waiting_value = State()
-    waiting_photo = State()
-    waiting_balance = State()
-
-
-router = Router()
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-
-def valid_https(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        return parsed.scheme == "https" and bool(parsed.netloc)
-    except Exception:
-        return False
-
-
-# =========================================================
-# WELCOME / PREVIEW
-# =========================================================
-
-async def show_preview(target: Message):
-    text = get_setting("welcome_text") or DEFAULT_WELCOME
-    photo = get_setting("welcome_photo")
-    markup = welcome_inline_keyboard()
-
-    # No HTML parsing here so admin can safely use < > & in welcome text.
-    if photo:
-        try:
-            await target.answer_photo(
-                photo=photo,
-                caption=text,
-                reply_markup=markup,
-                parse_mode=None,
-            )
-            return
-        except Exception:
-            # If an old/deleted file_id is stored, remove it and fall back to text.
-            set_setting("welcome_photo", "")
-
-    await target.answer(
+    text = start_message_text()
+    kb = build_start_keyboard()
+    await update.message.reply_text(
         text,
-        reply_markup=markup,
-        parse_mode=None,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+        disable_web_page_preview=True,
     )
 
+    if is_admin(uid):
+        await update.message.reply_text(
+            "🔧 Admin: /admin দিয়ে প্যানেল খুলুন।",
+            reply_markup=admin_kb(),
+        )
 
-async def show_admin_panel(message: Message):
-    if not is_admin(message.from_user.id):
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ শুধু Admin।")
         return
-
-    await message.answer(
-        "👑 <b>EasyIncomezBot Admin Panel</b>\n\n"
-        "নিচের বাটন থেকে Welcome, Photo, Open App, Channel, "
-        "Support, Group, Reviews এবং User Balance পরিবর্তন করুন।",
-        reply_markup=admin_keyboard(),
+    await update.message.reply_text(
+        "🔧 <b>Admin Panel</b>\n\n"
+        "নিচের বাটন দিয়ে সব সেটআপ করুন।\n"
+        "WebApp URL অবশ্যই <code>https://</code> দিয়ে শুরু করতে হবে।",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_kb(),
     )
 
 
-# =========================================================
-# START
-# =========================================================
-
-@router.message(Command("start"))
-async def start_handler(message: Message):
-    save_user(message.from_user)
-
-    await show_preview(message)
-
-    await message.answer(
-        "👇 নিচের মেনু থেকেও অপশনগুলো ব্যবহার করতে পারবেন।",
-        reply_markup=user_menu(),
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ℹ️ /start — মেইন মেনু\n"
+        "/admin — অ্যাডমিন প্যানেল (শুধু admin)"
     )
 
 
-@router.message(Command("admin"))
-async def admin_handler(message: Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ আপনি Admin নন।")
-        return
-
-    await show_admin_panel(message)
-
-    await message.answer(
-        "Admin shortcuts:",
-        reply_markup=admin_reply_menu(),
-    )
+# ================== CALLBACKS ==================
+async def noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("Admin এখনো WebApp URL সেট করেনি।", show_alert=True)
 
 
-# =========================================================
-# ADMIN REPLY BUTTONS
-# =========================================================
-
-@router.message(F.text == "⚙️ Admin Panel")
-async def admin_menu_button(message: Message):
-    await admin_handler(message)
+async def link_missing_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("লিংক সেট নেই — Admin Panel থেকে সেট করুন।", show_alert=True)
 
 
-@router.message(F.text == "📊 Statistics")
-async def stats_button(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    await message.answer(
-        f"📊 <b>Statistics</b>\n\n"
-        f"👤 Users: <b>{user_count()}</b>\n"
-        f"💰 Total Balance: <b>{total_balance():.2f}</b>",
-        reply_markup=admin_keyboard(),
-    )
-
-
-# =========================================================
-# ADMIN CALLBACKS
-# =========================================================
-
-EDIT_MAP = {
-    "open": ("open_text", "open_url", "🚀 Open App"),
-    "channel": ("channel_text", "channel_url", "📢 Channel"),
-    "support": ("support_text", "support_url", "💬 Support"),
-    "group": ("group_text", "group_url", "👥 Group"),
-    "reviews": ("reviews_text", "reviews_url", "⭐ Reviews"),
+# ================== ADMIN SET FLOW ==================
+FIELD_MAP = {
+    "📝 Welcome Text": ("welcome_text", "নতুন Welcome টেক্সট পাঠান (HTML চলবে):\n/cancel বাতিল"),
+    "🖼 Banner Text": ("banner_text", "Banner টেক্সট পাঠান (খালি রাখতে - লিখুন):\n/cancel"),
+    "🚀 WebApp URL": ("webapp_url", "Mini App / WebApp URL পাঠান (https://...):\n/cancel"),
+    "🔘 WebApp Button Name": ("webapp_button", "Open App বাটনের নাম পাঠান:\n/cancel"),
+    "📢 Channel Link": ("channel_url", "Channel লিংক (https://t.me/...):\n/cancel"),
+    "💬 Support Link": ("support_url", "Support লিংক (https://t.me/...):\n/cancel"),
+    "👥 Group Link": ("group_url", "Group লিংক:\n/cancel"),
+    "⭐ Reviews Link": ("reviews_url", "Reviews লিংক:\n/cancel"),
 }
 
 
-@router.callback_query(F.data.startswith("edit:"))
-async def edit_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Not allowed", show_alert=True)
-        return
-
-    action = callback.data.split(":", 1)[1]
-    await callback.answer()
-
-    if action in EDIT_MAP:
-        text_key, url_key, label = EDIT_MAP[action]
-
-        current_text = get_setting(text_key)
-        current_url = get_setting(url_key)
-
-        await state.update_data(
-            kind="link",
-            text_key=text_key,
-            url_key=url_key,
-            label=label,
-        )
-        await state.set_state(EditState.waiting_value)
-
-        await callback.message.answer(
-            f"✏️ <b>{escape(label)}</b>\n\n"
-            f"বর্তমান Button Text:\n"
-            f"<code>{escape(current_text)}</code>\n\n"
-            f"বর্তমান Link:\n"
-            f"<code>{escape(current_url or 'Not set')}</code>\n\n"
-            "এক লাইনে এভাবে পাঠান:\n"
-            "<code>Button Text | https://example.com</code>\n\n"
-            "Open App হলে অবশ্যই HTTPS Mini App URL দিন।",
-        )
-
-    elif action == "welcome":
-        await state.update_data(kind="welcome")
-        await state.set_state(EditState.waiting_value)
-
-        await callback.message.answer(
-            "📝 নতুন Welcome Text পাঠান।\n\n"
-            "আপনি যত লাইন চান দিতে পারবেন।"
-        )
-
-    elif action == "photo":
-        await state.set_state(EditState.waiting_photo)
-
-        await callback.message.answer(
-            "🖼️ এখন একটি Telegram Photo পাঠান।\n"
-            "Photo-টি /start-এর Welcome message-এর উপরে দেখানো হবে।"
-        )
-
-    elif action == "remove_photo":
-        set_setting("welcome_photo", "")
-
-        await callback.message.answer(
-            "✅ Welcome Photo remove করা হয়েছে।",
-            reply_markup=admin_keyboard(),
-        )
-
-    elif action == "balance":
-        await state.set_state(EditState.waiting_balance)
-
-        await callback.message.answer(
-            "👤 Balance Edit\n\n"
-            "এই format-এ পাঠান:\n"
-            "<code>USER_ID | AMOUNT</code>\n\n"
-            "উদাহরণ:\n"
-            "<code>123456789 | 250.50</code>",
-        )
-
-
-@router.callback_query(F.data == "show:settings")
-async def settings_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Not allowed", show_alert=True)
-        return
-
-    await callback.answer()
-
-    photo_status = "Set" if get_setting("welcome_photo") else "Not set"
-
-    text = (
-        "⚙️ <b>Current Settings</b>\n\n"
-        f"🚀 Open App:\n<code>{escape(get_setting('open_url') or 'Not set')}</code>\n\n"
-        f"📢 Channel:\n<code>{escape(get_setting('channel_url') or 'Not set')}</code>\n\n"
-        f"💬 Support:\n<code>{escape(get_setting('support_url') or 'Not set')}</code>\n\n"
-        f"👥 Group:\n<code>{escape(get_setting('group_url') or 'Not set')}</code>\n\n"
-        f"⭐ Reviews:\n<code>{escape(get_setting('reviews_url') or 'Not set')}</code>\n\n"
-        f"🖼️ Welcome Photo: <code>{photo_status}</code>"
+async def admin_field_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    text = update.message.text
+    if text not in FIELD_MAP:
+        return ConversationHandler.END
+    key, prompt = FIELD_MAP[text]
+    context.user_data["set_key"] = key
+    cur = get_setting(key) or "(empty)"
+    await update.message.reply_text(
+        f"বর্তমান:\n<code>{cur[:500]}</code>\n\n{prompt}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove(),
     )
+    return SET_VALUE
 
-    await callback.message.answer(
-        text,
-        reply_markup=admin_keyboard(),
+
+async def admin_set_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    key = context.user_data.get("set_key")
+    if not key:
+        return ConversationHandler.END
+    val = (update.message.text or "").strip()
+    if val == "-":
+        val = ""
+    if key == "webapp_url" and val and not val.startswith("https://"):
+        await update.message.reply_text(
+            "⚠️ WebApp URL অবশ্যই https:// দিয়ে শুরু হতে হবে। আবার পাঠান বা /cancel"
+        )
+        return SET_VALUE
+    set_setting(key, val)
+    context.user_data.pop("set_key", None)
+    await update.message.reply_text(
+        f"✅ <b>{key}</b> সেভ হয়েছে।",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_kb(),
     )
-
-
-@router.callback_query(F.data == "show:preview")
-async def preview_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Not allowed", show_alert=True)
-        return
-
-    await callback.answer()
-    await show_preview(callback.message)
-
-
-# =========================================================
-# ADMIN FSM: TEXT / LINKS
-# =========================================================
-
-@router.message(EditState.waiting_value, F.text)
-async def edit_text_handler(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await state.clear()
-        return
-
-    data = await state.get_data()
-    kind = data.get("kind")
-
-    # Welcome text
-    if kind == "welcome":
-        new_text = message.text.strip()
-
-        if not new_text:
-            await message.answer(
-                "❌ Text খালি হতে পারবে না। আবার পাঠান।"
+    # try update menu button if webapp
+    if key in ("webapp_url", "webapp_button") and get_setting("webapp_url").startswith("https://"):
+        try:
+            await context.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text=(get_setting("webapp_button") or "Open")[:20],
+                    web_app=WebAppInfo(url=get_setting("webapp_url")),
+                )
             )
-            return
+        except Exception as e:
+            logger.warning("menu button: %s", e)
+    return ConversationHandler.END
 
-        set_setting("welcome_text", new_text)
-        await state.clear()
 
-        await message.answer(
-            "✅ Welcome Text saved!",
-            reply_markup=admin_keyboard(),
-        )
+async def labels_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    context.user_data["set_key"] = "labels_pack"
+    await update.message.reply_text(
+        "৪টি লেবেল এক লাইনে | দিয়ে পাঠান:\n"
+        "<code>📢 Channel|💬 Support|👥 Group|⭐ Reviews</code>\n\n"
+        f"বর্তমান:\n"
+        f"{get_setting('channel_label')}|{get_setting('support_label')}|"
+        f"{get_setting('group_label')}|{get_setting('reviews_label')}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return SET_VALUE
+
+
+async def admin_set_value_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = context.user_data.get("set_key")
+    if key == "labels_pack":
+        parts = [p.strip() for p in (update.message.text or "").split("|")]
+        while len(parts) < 4:
+            parts.append("")
+        set_setting("channel_label", parts[0] or "📢 Channel")
+        set_setting("support_label", parts[1] or "💬 Support")
+        set_setting("group_label", parts[2] or "👥 Group")
+        set_setting("reviews_label", parts[3] or "⭐ Reviews")
+        context.user_data.pop("set_key", None)
+        await update.message.reply_text("✅ Labels updated.", reply_markup=admin_kb())
+        return ConversationHandler.END
+    return await admin_set_value(update, context)
+
+
+async def preview_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         return
-
-    # Button text + URL
-    if kind == "link":
-        parts = message.text.split("|", 1)
-
-        if len(parts) != 2:
-            await message.answer(
-                "❌ Format ভুল।\n\n"
-                "এভাবে পাঠান:\n"
-                "<code>Button Text | https://example.com</code>",
-            )
-            return
-
-        button_text = parts[0].strip()
-        url = parts[1].strip()
-
-        if not button_text:
-            await message.answer(
-                "❌ Button Text খালি হতে পারবে না।"
-            )
-            return
-
-        if not valid_https(url):
-            await message.answer(
-                "❌ Link অবশ্যই valid HTTPS URL হতে হবে।"
-            )
-            return
-
-        set_setting(data["text_key"], button_text)
-        set_setting(data["url_key"], url)
-
-        await state.clear()
-
-        await message.answer(
-            "✅ Successfully saved!\n\n"
-            f"🔘 Button: {escape(button_text)}\n"
-            f"🔗 URL: <code>{escape(url)}</code>",
-            reply_markup=admin_keyboard(),
-        )
-        return
-
-    await state.clear()
-
-
-# =========================================================
-# ADMIN PHOTO
-# =========================================================
-
-@router.message(EditState.waiting_photo, F.photo)
-async def photo_handler(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await state.clear()
-        return
-
-    file_id = message.photo[-1].file_id
-    set_setting("welcome_photo", file_id)
-
-    await state.clear()
-
-    await message.answer(
-        "✅ Welcome Photo saved!",
-        reply_markup=admin_keyboard(),
+    await update.message.reply_text(
+        start_message_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_start_keyboard(),
+        disable_web_page_preview=True,
     )
 
 
-@router.message(EditState.waiting_photo)
-async def photo_wrong_type(message: Message):
-    if is_admin(message.from_user.id):
-        await message.answer(
-            "❌ একটি Telegram Photo পাঠান।"
-        )
-
-
-# =========================================================
-# ADMIN BALANCE
-# =========================================================
-
-@router.message(EditState.waiting_balance, F.text)
-async def balance_handler(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await state.clear()
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         return
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM users")
+    uc = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) AS c FROM admins")
+    ac = cur.fetchone()["c"]
+    conn.close()
+    await update.message.reply_text(
+        f"📊 Users: <b>{uc}</b>\nAdmins: <b>{ac}</b>\nOwner: <code>{owner_id()}</code>\n"
+        f"WebApp: <code>{(get_setting('webapp_url') or '-')[:60]}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_kb(),
+    )
 
-    parts = message.text.split("|", 1)
 
-    if len(parts) != 2:
-        await message.answer(
-            "❌ Format:\n<code>USER_ID | AMOUNT</code>",
-        )
-        return
+# ================== ADMIN MANAGE ==================
+async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_main(update.effective_user.id):
+        await update.message.reply_text("শুধু Main Owner Add Admin করতে পারে।")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "নতুন Admin এর Telegram User ID পাঠান:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ADD_ADMIN_ID
 
+
+async def add_admin_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_main(update.effective_user.id):
+        return ConversationHandler.END
     try:
-        user_id = int(parts[0].strip())
-        amount = float(parts[1].strip())
-    except ValueError:
-        await message.answer(
-            "❌ USER_ID integer এবং AMOUNT number হতে হবে।"
-        )
+        nid = int(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("সঠিক User ID দিন।")
+        return ADD_ADMIN_ID
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO admins (user_id, role, added_at) VALUES (?,?,?)",
+        (nid, "admin", datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"✅ Admin added: {nid}", reply_markup=admin_kb())
+    try:
+        await context.bot.send_message(nid, "🔧 আপনাকে Admin বানানো হয়েছে। /admin")
+    except Exception:
+        pass
+    return ConversationHandler.END
+
+
+async def remove_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_main(update.effective_user.id):
+        await update.message.reply_text("শুধু Main Owner Remove করতে পারে।")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "রিমুভ করার Admin User ID:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return REMOVE_ADMIN_ID
+
+
+async def remove_admin_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_main(update.effective_user.id):
+        return ConversationHandler.END
+    try:
+        nid = int(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("সঠিক ID দিন।")
+        return REMOVE_ADMIN_ID
+    if nid == MAIN_ADMIN_ID or nid == owner_id():
+        await update.message.reply_text("Main Owner রিমুভ করা যাবে না।", reply_markup=admin_kb())
+        return ConversationHandler.END
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM admins WHERE user_id=? AND role!='main'", (nid,))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"🗑 Removed: {nid}", reply_markup=admin_kb())
+    return ConversationHandler.END
+
+
+async def transfer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_main(update.effective_user.id):
+        await update.message.reply_text("শুধু Main Owner।")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "নতুন Owner এর User ID পাঠান (এটি উল্টানো যাবে না সহজে):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return TRANSFER_ID
+
+
+async def transfer_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_main(update.effective_user.id):
+        return ConversationHandler.END
+    try:
+        nid = int(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("সঠিক ID দিন।")
+        return TRANSFER_ID
+    if nid == update.effective_user.id:
+        await update.message.reply_text("নিজেকে ট্রান্সফার নয়।", reply_markup=admin_kb())
+        return ConversationHandler.END
+    set_setting("owner_id", str(nid))
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO admins (user_id, role, added_at) VALUES (?,?,?)",
+        (nid, "main", datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"👑 Ownership transferred to {nid}",
+        reply_markup=admin_kb(),
+    )
+    try:
+        await context.bot.send_message(nid, "👑 আপনি এখন Main Owner। /admin")
+    except Exception:
+        pass
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    kb = admin_kb() if is_admin(update.effective_user.id) else ReplyKeyboardRemove()
+    await update.message.reply_text("বাতিল।", reply_markup=kb)
+    return ConversationHandler.END
+
+
+async def close_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Admin বন্ধ। /start চাপুন।",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    uid = update.effective_user.id
+    if not is_admin(uid):
         return
+    if text == "👁 Preview Start":
+        await preview_start(update, context)
+    elif text == "📊 Stats":
+        await stats_cmd(update, context)
+    elif text == "🏠 Close Admin":
+        await close_admin(update, context)
+    elif text == "🏷 Labels (Ch/Sup/Grp/Rev)":
+        return  # conversation entry
+    # other fields handled by ConversationHandler entry points
 
-    if amount < 0:
-        await message.answer(
-            "❌ Balance negative করা যাবে না।"
-        )
+
+def main():
+    if not BOT_TOKEN or "YOUR_BOT" in BOT_TOKEN:
+        print("ERROR: BOT_TOKEN সেট করুন")
         return
-
-    if get_user(user_id) is None:
-        await message.answer(
-            "❌ এই User ID database-এ নেই।"
-        )
-        return
-
-    set_balance(user_id, amount)
-    await state.clear()
-
-    await message.answer(
-        f"✅ Balance updated.\n\n"
-        f"👤 User ID: <code>{user_id}</code>\n"
-        f"💰 Balance: <b>{amount:.2f}</b>",
-        reply_markup=admin_keyboard(),
-    )
-
-
-# =========================================================
-# USER MENU
-# =========================================================
-
-async def send_link_or_not(
-    message: Message,
-    url_key: str,
-    text_key: str,
-):
-    url = get_setting(url_key)
-
-    if not url:
-        await message.answer(
-            "⚠️ এই link এখনো Admin সেট করেননি।"
-        )
-        return
-
-    button_text = get_setting(text_key) or "Open"
-
-    await message.answer(
-        f"<b>{escape(button_text)}</b>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔗 Open",
-                        url=url,
-                    )
-                ]
-            ]
-        ),
-    )
-
-
-@router.message(F.text == "🚀 Open App")
-async def user_open_app(message: Message):
-    url = get_setting("open_url")
-
-    if not url:
-        await message.answer(
-            "⚠️ Open App link এখনো সেট করা হয়নি।"
-        )
-        return
-
-    await message.answer(
-        "🚀 Mini App খুলুন:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=get_setting("open_text") or "🚀 Open App",
-                        web_app=WebAppInfo(url=url),
-                    )
-                ]
-            ]
-        ),
-    )
-
-
-@router.message(F.text == "📢 Channel")
-async def user_channel(message: Message):
-    await send_link_or_not(
-        message,
-        "channel_url",
-        "channel_text",
-    )
-
-
-@router.message(F.text == "💬 Support")
-async def user_support(message: Message):
-    await send_link_or_not(
-        message,
-        "support_url",
-        "support_text",
-    )
-
-
-@router.message(F.text == "👥 Group")
-async def user_group(message: Message):
-    await send_link_or_not(
-        message,
-        "group_url",
-        "group_text",
-    )
-
-
-@router.message(F.text == "⭐ Reviews")
-async def user_reviews(message: Message):
-    await send_link_or_not(
-        message,
-        "reviews_url",
-        "reviews_text",
-    )
-
-
-@router.message(F.text == "💰 My Balance")
-async def user_balance(message: Message):
-    save_user(message.from_user)
-
-    row = get_user(message.from_user.id)
-    balance = row[3] if row else 0
-
-    await message.answer(
-        f"💰 <b>Your Balance</b>\n\n"
-        f"💵 Balance: <b>{balance:.2f}</b>",
-    )
-
-
-@router.message(F.text == "🔗 Referral")
-async def referral(message: Message, bot: Bot):
-    me = await bot.me()
-
-    link = (
-        f"https://t.me/{me.username}?start={message.from_user.id}"
-        if me.username
-        else "Bot username not available"
-    )
-
-    await message.answer(
-        "🔗 <b>Your Referral Link</b>\n\n"
-        f"<code>{escape(link)}</code>\n\n"
-        "এই লিংক ভবিষ্যতের referral reward system-এ ব্যবহার করা যাবে।"
-    )
-
-
-# =========================================================
-# CANCEL
-# =========================================================
-
-@router.message(Command("cancel"))
-async def cancel_handler(
-    message: Message,
-    state: FSMContext,
-):
-    await state.clear()
-    await message.answer(
-        "❌ Current edit cancelled."
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-
-async def main():
-    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        raise RuntimeError(
-            "BOT_TOKEN সেট করুন। Environment variable BOT_TOKEN "
-            "অথবা কোডের BOT_TOKEN-এ token বসান।"
-        )
-
     init_db()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML
-        ),
+    set_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(
+                filters.Regex(
+                    r"^(📝 Welcome Text|🖼 Banner Text|🚀 WebApp URL|🔘 WebApp Button Name|"
+                    r"📢 Channel Link|💬 Support Link|👥 Group Link|⭐ Reviews Link)$"
+                ),
+                admin_field_start,
+            ),
+            MessageHandler(
+                filters.Regex(r"^🏷 Labels"),
+                labels_start,
+            ),
+        ],
+        states={
+            SET_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_value_router)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
+    add_adm = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(r"^➕ Add Admin$"), add_admin_start)],
+        states={
+            ADD_ADMIN_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_admin_receive)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    rm_adm = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(r"^🗑 Remove Admin$"), remove_admin_start)
+        ],
+        states={
+            REMOVE_ADMIN_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, remove_admin_receive)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    tr_adm = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(r"^👑 Ownership Transfer$"), transfer_start)
+        ],
+        states={
+            TRANSFER_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_receive)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
-    logging.basicConfig(level=logging.INFO)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CallbackQueryHandler(noop_cb, pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(link_missing_cb, pattern=r"^link_missing_"))
+    app.add_handler(set_conv)
+    app.add_handler(add_adm)
+    app.add_handler(rm_adm)
+    app.add_handler(tr_adm)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("EasyIncomezBot is running...")
-
-    await dp.start_polling(bot)
+    logger.info("Mini App Launcher Bot starting...")
+    print("Bot running... Admin ID:", MAIN_ADMIN_ID)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
